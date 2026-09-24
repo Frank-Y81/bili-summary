@@ -27,13 +27,19 @@ npm run pack           # 构建 + 打包成 release/bilibili-summary-v<版本>.z
 1. `manifest.json` 与 `package.json` 的版本号必须一致（**版本号以 `manifest.json` 为准**，改版本时两个都改）
 2. `dist/` 里不允许出现形如 `sk-xxxxxxxx` 的明文密钥
 
-打包出来的 zip 根层就是扩展本体，解压后直接「加载已解压的扩展程序」。
+打包出来的 zip 根层就是扩展本体，另外带一份 `INSTALL.txt`（解压后第一眼能看到怎么装）。
 
-在 Chrome 里加载：
+安装（需要 **Chrome 116+**，`chrome.sidePanel.open()` 从 116 才有）：
 
-1. 打开 `chrome://extensions` → 右上角开「开发者模式」
-2. 「加载已解压的扩展程序」→ 选 `dist` 文件夹
-3. 按 `Ctrl+K` 呼出侧边栏（改键：`chrome://extensions/shortcuts`）
+1. 解压 zip
+2. 打开 `chrome://extensions` → 右上角开启**开发者模式**（不开装不了）
+3. 把**解压出来的那个文件夹**整个拖到页面上（或点「加载已解压的扩展程序」选中它）
+   - 要拖/选**含 `manifest.json` 的那一层**；选它的上一层会提示“找不到清单文件”
+4. 打开任意 B站视频页 → `Ctrl+K` 呼出侧边栏（改键：`chrome://extensions/shortcuts`）
+
+**拖 zip 或拖 crx 都装不了**，这是 Chrome 的限制，不是打包没做好：zip 不是可安装格式；crx 从 Chrome 33 起在 Windows/macOS 上禁止从本地文件外部安装（只允许应用店或企业策略）。所以可行的只有开发者模式 + 解压目录，或者上架。
+
+开发时直接在 Chrome 里加载：先把上面的第 3 步改成选 `dist` 文件夹（`npm run pack` 会把 `INSTALL.txt` 写进 `dist/`，下一次 `npm run build` 会清掉）。
 
 **改完代码后**：`npm run build` → 回 `chrome://extensions` 点刷新图标。**改过 `manifest.json` 必须刷新**（重开侧边栏不够）。
 

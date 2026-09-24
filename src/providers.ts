@@ -10,81 +10,81 @@ function createProvider(cfg: ProviderConfig): ProviderCard {
     baseUrl: cfg.baseUrl,
     models: cfg.models,
     async generate(input: GenerateInput): Promise<string> {
-    // 下面所有失败都 throw（而不是 return 文案）：后台的失败通道不落盘，
-    // 而 return 出去的字符串会被当成“总结”写进历史和缓存（历史里到处是“生成总结失败”）
-    if(!cfg.key) throw new Error(`「${cfg.name}」还没填 API Key（设置 → 厂商管理 → 编辑）`)
-    const key = cfg.key
+      // 下面所有失败都 throw（而不是 return 文案）：后台的失败通道不落盘，
+      // 而 return 出去的字符串会被当成“总结”写进历史和缓存（历史里到处是“生成总结失败”）
+      if (!cfg.key) throw new Error(`「${cfg.name}」还没填 API Key（设置 → 厂商管理 → 编辑）`)
+      const key = cfg.key
 
-    // 拼接：system = 系统角色 + 通用约束
-    const system = [SYSTEM_ROLE, COMMON_CONSTRAINTS].filter(Boolean).join('\n')
+      // 拼接：system = 系统角色 + 通用约束
+      const system = [SYSTEM_ROLE, COMMON_CONSTRAINTS].filter(Boolean).join('\n')
 
-    let res: Response
-    try {
-      res = await postChat(chatCompletionsUrl(cfg.baseUrl), {
-        method: 'POST',
-        signal: input.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + key
-        },
-        body: JSON.stringify({
-          model: input.model ?? cfg.models[0],
-          max_tokens: 8192,
-          stream: true,
-          messages: [
-            {role: 'system', content: system},
-            {role: 'user', content: `视频标题：${input.title}\n视频简介：${input.desc}\n${input.sourceLabel}：${input.source}`},
-            {role: 'user', content: input.prompt}
-          ]
+      let res: Response
+      try {
+        res = await postChat(chatCompletionsUrl(cfg.baseUrl), {
+          method: 'POST',
+          signal: input.signal,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + key
+          },
+          body: JSON.stringify({
+            model: input.model ?? cfg.models[0],
+            max_tokens: 8192,
+            stream: true,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: `视频标题：${input.title}\n视频简介：${input.desc}\n${input.sourceLabel}：${input.source}` },
+              { role: 'user', content: input.prompt }
+            ]
+          })
         })
-      })
-    } catch (err) {
-      // 用户主动中断：这不是“发不出去”，必须原样抛出去，后台据此静默收场（也别再落盘）
-      if(isAbortError(err)) throw err
-      // fetch 直接抛（不是 HTTP 错误）：多半是域名没授权或地址写错，笼统说“生成失败”等于没说
-      console.error('请求发不出去：', err)
-      throw new Error(`请求发不出去：「${cfg.name}」的域名可能还没授权（设置 → 厂商管理 → 授权访问），或接口地址填错了`)
-    }
-
-    // API 异常时抛出明确错误，而不是兜底文案
-    if(!res.ok) {
-      const errText = await res.text().catch(() => '')
-      console.error('请求失败：', res.status, errText.slice(0, 200))
-      // 把服务端的说法带一句回面板，省得每次都去翻后台控制台
-      const detail = errText.replace(/\s+/g, ' ').trim().slice(0, 160)
-
-      // 超长是最常见、也最看不懂的一类失败：直接说清“多少字、哪个模型、怎么办”，
-      // 而不是把服务端那句 context_length_exceeded 原样甩出去
-      if(isTooLongError(res.status, errText)) {
-        throw new Error(`${input.sourceLabel}太长：${input.source.length} 字，超出了「${input.model ?? cfg.models[0]}」的上下文上限。`
-          + `换个窗口更大的模型，或换一个短一点的视频。（服务端原文：${detail || res.status}）`)
+      } catch (err) {
+        // 用户主动中断：这不是“发不出去”，必须原样抛出去，后台据此静默收场（也别再落盘）
+        if (isAbortError(err)) throw err
+        // fetch 直接抛（不是 HTTP 错误）：多半是域名没授权或地址写错，笼统说“生成失败”等于没说
+        console.error('请求发不出去：', err)
+        throw new Error(`请求发不出去：「${cfg.name}」的域名可能还没授权（设置 → 厂商管理 → 授权访问），或接口地址填错了`)
       }
 
-      throw new Error(`生成总结失败（HTTP ${res.status}${detail ? '：' + detail : ''}）`)
-    }
+      // API 异常时抛出明确错误，而不是兜底文案
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '')
+        console.error('请求失败：', res.status, errText.slice(0, 200))
+        // 把服务端的说法带一句回面板，省得每次都去翻后台控制台
+        const detail = errText.replace(/\s+/g, ' ').trim().slice(0, 160)
 
-    if(!res.body) throw new Error('生成总结失败（响应没有可读的流）')
+        // 超长是最常见、也最看不懂的一类失败：直接说清“多少字、哪个模型、怎么办”，
+        // 而不是把服务端那句 context_length_exceeded 原样甩出去
+        if (isTooLongError(res.status, errText)) {
+          throw new Error(`${input.sourceLabel}太长：${input.source.length} 字，超出了「${input.model ?? cfg.models[0]}」的上下文上限。`
+            + `换个窗口更大的模型，或换一个短一点的视频。（服务端原文：${detail || res.status}）`)
+        }
 
-    // 服务端可能无视 stream:true 直接回一坨 JSON——那下面会解析出 0 帧，日志里能看出来
-    console.log('[summary] 响应', res.status, res.headers.get('content-type'))
-
-    // 边收边吐，最后把拼完的整段返回（调用方拿到的仍是一个字符串，契约没变形状）
-    const { text, finishReason } = await readSseStream(res.body, input.onDelta)
-    if(!text) throw new Error('生成总结失败（流里没有内容帧，控制台有响应类型日志）')
-
-    // 输出被 max_tokens 顶满：HTTP 200，但正文是被硬截断的（finish_reason=length）
-    // 这种半截总结以前会被当成完整的存下来，用户根本看不出来 —— 留着它，但必须在正文里说明
-    if(finishReason === 'length') {
-      // 中间产物（分片第一轮的要点）不能附：它不是给用户看的总结，附上去会污染第二轮输入
-      if(input.appendTruncationNote === false) {
-        console.warn('[summary] 输出被 max_tokens 截断（中间产物，不附提示）')
-        return text
+        throw new Error(`生成总结失败（HTTP ${res.status}${detail ? '：' + detail : ''}）`)
       }
-      return text + '\n\n> ⚠️ 这份总结被模型的输出上限（max_tokens 8192）截断了，并不完整：'
-        + '可以让模式指令要求写得短一些，或换输出上限更大的模型。'
-    }
 
-    return text
+      if (!res.body) throw new Error('生成总结失败（响应没有可读的流）')
+
+      // 服务端可能无视 stream:true 直接回一坨 JSON——那下面会解析出 0 帧，日志里能看出来
+      console.log('[summary] 响应', res.status, res.headers.get('content-type'))
+
+      // 边收边吐，最后把拼完的整段返回（调用方拿到的仍是一个字符串，契约没变形状）
+      const { text, finishReason } = await readSseStream(res.body, input.onDelta)
+      if (!text) throw new Error('生成总结失败（流里没有内容帧，控制台有响应类型日志）')
+
+      // 输出被 max_tokens 顶满：HTTP 200，但正文是被硬截断的（finish_reason=length）
+      // 这种半截总结以前会被当成完整的存下来，用户根本看不出来 —— 留着它，但必须在正文里说明
+      if (finishReason === 'length') {
+        // 中间产物（分片第一轮的要点）不能附：它不是给用户看的总结，附上去会污染第二轮输入
+        if (input.appendTruncationNote === false) {
+          console.warn('[summary] 输出被 max_tokens 截断（中间产物，不附提示）')
+          return text
+        }
+        return text + '\n\n> ⚠️ 这份总结被模型的输出上限（max_tokens 8192）截断了，并不完整：'
+          + '可以让模式指令要求写得短一些，或换输出上限更大的模型。'
+      }
+
+      return text
     }
   }
 }
@@ -103,8 +103,8 @@ const TOO_LONG_PATTERNS = [
 ]
 
 function isTooLongError(status: number, body: string): boolean {
-  if(status === 413) return true   // Payload Too Large：不用再猜
-  if(status !== 400 && status !== 422) return false
+  if (status === 413) return true   // Payload Too Large：不用再猜
+  if (status !== 400 && status !== 422) return false
   const text = body.toLowerCase()
   return TOO_LONG_PATTERNS.some(p => text.includes(p))
 }
@@ -173,8 +173,8 @@ async function readSseStream(
 }
 
 async function postChat(url: string, init: RequestInit): Promise<Response> {
-  if(!DRY_RUN) return fetch(url, init)
-  
+  if (!DRY_RUN) return fetch(url, init)
+
   const body = JSON.parse(init.body as string)
   const sizes = body.messages.map((m: any) => `${m.role}:${String(m.content).length}字`).join(' ')
   const log = `【dry-run】\n\n发到：${url}\n\n模型：${body.model}\n\n消息：${sizes}`
@@ -186,7 +186,7 @@ async function postChat(url: string, init: RequestInit): Promise<Response> {
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
       // dry-run 也认中断：替身走的是与真调用同一条解析链，不认的话测不出中断路径
-      if(init.signal?.aborted) {
+      if (init.signal?.aborted) {
         controller.error(new DOMException('Aborted', 'AbortError'))
         return
       }
@@ -262,9 +262,9 @@ export async function testProviderConnection(input: {
   const startedAt = Date.now()
   const done = (ok: boolean, message: string) => ({ ok, ms: Date.now() - startedAt, message })
 
-  if(DRY_RUN) return done(true, '【dry-run】跳过真实请求')
-  if(!input.key) return done(false, '还没填 API Key')
-  if(!input.model) return done(false, '还没填模型名')
+  if (DRY_RUN) return done(true, '【dry-run】跳过真实请求')
+  if (!input.key) return done(false, '还没填 API Key')
+  if (!input.model) return done(false, '还没填模型名')
 
   let res: Response
   try {
@@ -290,12 +290,12 @@ export async function testProviderConnection(input: {
     return done(false, `请求发不出去：域名可能没授权（点上面的「授权访问」），或地址/网络不通（${url}）`)
   }
 
-  if(!res.ok) {
+  if (!res.ok) {
     const detail = (await res.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 160)
     return done(false, `HTTP ${res.status}${detail ? '：' + detail : ''}`)
   }
 
-  if(!res.body) return done(false, 'HTTP 通了，但响应没有可读的流')
+  if (!res.body) return done(false, 'HTTP 通了，但响应没有可读的流')
 
   // 有帧才算真的能生成：服务端无视 stream:true 直接回一坨 JSON 的情况，就是在这里抓出来的
   let frames = 0
@@ -303,12 +303,12 @@ export async function testProviderConnection(input: {
     frames = (await readSseStream(res.body, undefined, '[连接测试]')).frames
   } catch (err) {
     // AbortSignal.timeout 到点：流读了一半被中止
-    if(isAbortError(err)) return done(false, '20 秒内没把流式响应读完（超时）')
+    if (isAbortError(err)) return done(false, '20 秒内没把流式响应读完（超时）')
     console.error('连接测试读流失败：', err)
     return done(false, `流式响应读不了：${err instanceof Error ? err.message : String(err)}`)
   }
 
-  if(!frames) return done(false, '一个流式数据帧都没收到（服务端可能无视了 stream:true、直接回一坨 JSON）—— 生成时同样会失败')
+  if (!frames) return done(false, '一个流式数据帧都没收到（服务端可能无视了 stream:true、直接回一坨 JSON）—— 生成时同样会失败')
   return done(true, `连接正常（${input.model} 已流式响应，${frames} 帧）`)
 }
 

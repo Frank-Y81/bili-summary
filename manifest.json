@@ -2,6 +2,8 @@
   "manifest_version": 3,
   "name": "B站视频 AI总结",
   "version": "1.0.0",
+  "description": "用自己配置的模型给 B站视频生成 AI 总结：抓播放器字幕、流式输出、可随时中断、长字幕自动分片",
+  "minimum_chrome_version": "116",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
