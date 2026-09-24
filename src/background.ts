@@ -1,8 +1,9 @@
-import { createDefaultMode, type PromptMode } from './prompts'
-import { MSG_GET_SUBTITLE_INFO, MSG_DELETE_RECORD, PORT_SUMMARY_STREAM, FRAME_GENERATE, FRAME_CANCEL, FRAME_DELTA, FRAME_DONE, FRAME_ERROR } from './messages'
+import { createDefaultMode, MAP_INSTRUCTION, REDUCE_INSTRUCTION, type PromptMode } from './prompts'
+import { MSG_GET_SUBTITLE_INFO, MSG_DELETE_RECORD, PORT_SUMMARY_STREAM, FRAME_GENERATE, FRAME_CANCEL, FRAME_DELTA, FRAME_DONE, FRAME_ERROR, FRAME_PROGRESS } from './messages'
 import { loadProviders } from "./providers";
+import { splitSubtitle } from './subtitle-split';
 import { STORAGE_KEYS } from './storage-keys';
-import type { ProviderSetting, SummaryRecord } from './types';
+import type { ProviderCard, ProviderSetting, SummaryRecord } from './types';
 
 // 快捷键呼出
 // tab呢，为什么要有个tab.id给open？让它在当前页打开side panel？
@@ -55,7 +56,10 @@ chrome.runtime.onConnect.addListener(port => {
     generateSummary(text => {
       // 面板中途关了的话端口已断，postMessage 会抛——不能让它影响后台继续生成、落盘
       try { port.postMessage({ type: FRAME_DELTA, text }) } catch { /* 面板已关闭 */ }
-    }, ac.signal)
+    }, ac.signal, text => {
+      // 进度（分片汇总时的“第 2/5 段”）：面板只在正文还没开始流的时候显示它
+      try { port.postMessage({ type: FRAME_PROGRESS, text }) } catch { /* 面板已关闭 */ }
+    })
       .then(summary => {
         // 刚好在收尾前被中断：不算完成，也别再往已废弃的连接上推
         if(ac.signal.aborted) return
@@ -70,9 +74,10 @@ chrome.runtime.onConnect.addListener(port => {
         }
         console.error('generateSummary的promise失败：', err)
         try {
+          // 不落盘的那条通道：文案本身已是完整的句子（提前 return 会被当成总结存进历史）
           port.postMessage({
             type: FRAME_ERROR,
-            message: `生成失败：${err instanceof Error ? err.message : String(err)}`
+            message: err instanceof Error ? err.message : String(err)
           })
         } catch { /* 面板已关闭 */ }
       })
@@ -112,6 +117,7 @@ async function handleSubtitleInfo(message: any) {
     [STORAGE_KEYS.videoId]: cid,
     ...(videoChanged ? {
       [STORAGE_KEYS.videoSubtitle]: '',
+      [STORAGE_KEYS.videoSubtitleMarks]: [],
       [STORAGE_KEYS.subtitleStatus]: 'loading',
       [STORAGE_KEYS.videoSummary]: '',
       [STORAGE_KEYS.videoSummaryId]: ''
@@ -128,9 +134,14 @@ async function handleSubtitleInfo(message: any) {
       const { videoId } = await chrome.storage.local.get(STORAGE_KEYS.videoId)
       if(videoId !== cid) return
 
-      const text = (sub.body ?? []).map((l: any) => l.content).join('\n')
+      const body = (sub.body ?? []) as { from?: number; content?: string }[]
+      const text = body.map((l: any) => l.content ?? '').join('\n')
+      // 时间轴单独存一份：拼进正文会白烧 token（B 站字幕一行就几个字，加 [12:34] 前缀能把输入翻倍），
+      // 而它的唯一用途是分片时判断哪里是话题切换
+      const marks = body.map((l: any) => Math.round(Number(l.from ?? 0)))
       await chrome.storage.local.set({
         [STORAGE_KEYS.videoSubtitle]: text,
+        [STORAGE_KEYS.videoSubtitleMarks]: marks,
         [STORAGE_KEYS.subtitleStatus]: 'ready'
       })
     } catch (err) {
@@ -141,19 +152,24 @@ async function handleSubtitleInfo(message: any) {
     if(videoId !== cid) return
     await chrome.storage.local.set({
       [STORAGE_KEYS.subtitleStatus]: 'no-subtitle',
-      [STORAGE_KEYS.videoSubtitle]: ''
+      [STORAGE_KEYS.videoSubtitle]: '',
+      [STORAGE_KEYS.videoSubtitleMarks]: []
     })
   }
 }
 
-async function generateSummary(onDelta?: (text: string) => void, signal?: AbortSignal) {
-  const { videoTitle, videoSubtitle, videoDesc, videoId, videoTitleId } = 
+async function generateSummary(
+  onDelta?: (text: string) => void,
+  signal?: AbortSignal,
+  onProgress?: (text: string) => void
+) {
+  const { videoTitle, videoSubtitle, videoDesc, videoId, videoTitleId, videoSubtitleMarks } = 
     await chrome.storage.local.get([
       STORAGE_KEYS.videoTitle, STORAGE_KEYS.videoSubtitle, STORAGE_KEYS.videoDesc,
-      STORAGE_KEYS.videoId, STORAGE_KEYS.videoTitleId
+      STORAGE_KEYS.videoId, STORAGE_KEYS.videoTitleId, STORAGE_KEYS.videoSubtitleMarks
     ])
-  if (!videoSubtitle) return '未抓获字幕，无法总结'
-  if (videoTitleId !== videoId) return '视频信息尚未就绪，请稍候重试'
+  if (!videoSubtitle) throw new Error('未抓获字幕，无法总结')
+  if (videoTitleId !== videoId) throw new Error('视频信息尚未就绪，请稍候重试')
   
   // 找到当前模式：数据异常或不存在时兜底到默认模式
   const { promptModes, activeModeId } = await chrome.storage.local.get([STORAGE_KEYS.promptModes, STORAGE_KEYS.activeModeId])
@@ -165,27 +181,30 @@ async function generateSummary(onDelta?: (text: string) => void, signal?: AbortS
   const allProviders = await loadProviders()
   const provider = allProviders.find(p => p.id === activeProviderId)
 
-  if(!provider) return allProviders.length
+  if(!provider) throw new Error(allProviders.length
     ? '所选厂商不可用'
-    : '还没配置任何厂商（设置 → 厂商管理 → 新增厂商）'
+    : '还没配置任何厂商（设置 → 厂商管理 → 新增厂商）')
   const { providerSetting } = await chrome.storage.local.get<{ providerSetting: ProviderSetting}>(STORAGE_KEYS.providerSetting)
 
-  const summary = await provider.generate({
+  const summary = await generateWithSegments({
     title: videoTitle as string,
     desc: videoDesc as string,
     subtitle: videoSubtitle as string,
-    prompt: mode.prompt,
-    model:providerSetting?.[activeProviderId as string]?.model,
+    marks: videoSubtitleMarks as number[] | undefined,
+    mode,
+    model: providerSetting?.[activeProviderId as string]?.model,
+    provider,
     onDelta,
+    onProgress,
     signal
   })
 
   // 中断：请求断了就到此为止，不许把半截结果写进缓存和历史
-  if(signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+  throwIfAborted(signal)
 
   const {videoId: latestId} = await chrome.storage.local.get(STORAGE_KEYS.videoId)
   if(videoId !== latestId) {
-    return '视频变化了，拒绝存入旧视频数据'
+    throw new Error('视频变化了，拒绝存入旧视频数据')
   }
 
   const newRecord: SummaryRecord = {
@@ -214,4 +233,69 @@ async function generateSummary(onDelta?: (text: string) => void, signal?: AbortS
     [STORAGE_KEYS.videoSummaryModeId]: mode.id
   })
   return summary
+}
+
+// 中断检查：分片流程每一个阶段之间都要看一眼，别让用户点了“停止”之后还把后面的段接着烧
+function throwIfAborted(signal?: AbortSignal) {
+  if(signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+}
+
+interface SegmentInput {
+  title: string
+  desc: string
+  subtitle: string
+  marks?: number[]
+  mode: PromptMode
+  model?: string
+  provider: ProviderCard
+  onDelta?: (text: string) => void
+  onProgress?: (text: string) => void
+  signal?: AbortSignal
+}
+
+// 一条请求还是分片两轮，就在这里分叉
+// 没超阈值（只有一片）= 跟以前完全一样：一条请求、一次流式，质量最好
+// 超了才降级成两轮：先分片抽要点（不流式），再把要点合并成最终总结（这一步才流给面板）
+async function generateWithSegments(input: SegmentInput): Promise<string> {
+  const parts = splitSubtitle(input.subtitle, input.marks)
+  const common = { title: input.title, desc: input.desc, model: input.model, signal: input.signal }
+
+  if (parts.length <= 1) {
+    return input.provider.generate({
+      ...common,
+      source: input.subtitle,
+      sourceLabel: '字幕内容',
+      prompt: input.mode.prompt,
+      onDelta: input.onDelta
+    })
+  }
+
+  console.log(`[summary] 字幕 ${input.subtitle.length} 字，分 ${parts.length} 片汇总`)
+
+  // 第一轮（map）：每片压成要点。不传 onDelta —— 中间产物流给用户，只会让人以为总结就长这样
+  const notes: string[] = []
+  for (const [i, part] of parts.entries()) {
+    throwIfAborted(input.signal)
+    const label = `第 ${i + 1}/${parts.length} 段${part.range ? `（${part.range}）` : ''}`
+    input.onProgress?.(`正在分段处理：${label}`)
+    const note = await input.provider.generate({
+      ...common,
+      source: part.text,
+      sourceLabel: `本段字幕（${label}）`,
+      prompt: `${MAP_INSTRUCTION}\n${input.mode.prompt}`,
+      appendTruncationNote: false
+    })
+    notes.push(`## ${label}\n${note}`)
+  }
+
+  // 第二轮（reduce）：合并要点 → 最终总结
+  throwIfAborted(input.signal)
+  input.onProgress?.(`正在合并 ${parts.length} 段要点…`)
+  return input.provider.generate({
+    ...common,
+    source: notes.join('\n\n'),
+    sourceLabel: '各段要点',
+    prompt: `${REDUCE_INSTRUCTION}\n${input.mode.prompt}`,
+    onDelta: input.onDelta
+  })
 }

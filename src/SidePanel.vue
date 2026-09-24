@@ -49,7 +49,7 @@
     </div>
     <div v-else-if="uiStatus === 'generating'" class="stale-wrap">
       <div class="stale-bar">
-        <span class="stale-text">正在生成{{ summaryText ? `（已收 ${summaryText.length} 字）` : '...' }}</span>
+        <span class="stale-text">{{ progressText || `正在生成${summaryText ? `（已收 ${summaryText.length} 字）` : '...'}` }}</span>
         <div class="stale-actions">
           <button class="regenerate-btn" title="中断当前请求，立刻重新生成" @click="regenerate">重新生成</button>
           <button class="regenerate-btn secondary" title="中断当前请求（后台真停下，不再计费），保留已收到的部分" @click="stopGenerating">停止</button>
@@ -373,7 +373,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { marked } from "marked";
 import { createDefaultMode, DEFAULT_MODE_ID, MAX_MODES, type PromptMode } from "./prompts";
-import { MSG_DELETE_RECORD, PORT_SUMMARY_STREAM, FRAME_GENERATE, FRAME_CANCEL, FRAME_DELTA, FRAME_DONE, FRAME_ERROR } from "./messages";
+import { MSG_DELETE_RECORD, PORT_SUMMARY_STREAM, FRAME_GENERATE, FRAME_CANCEL, FRAME_DELTA, FRAME_DONE, FRAME_ERROR, FRAME_PROGRESS } from "./messages";
 import { buildProviders, chatCompletionsUrl, loadProviderConfigs, normalizeBaseUrl, originPatternOf, saveProviderConfigs, testProviderConnection } from "./providers";
 import { STORAGE_KEYS } from "./storage-keys";
 import { type ProviderCard, type ProviderConfig, type ProviderSetting, type SummaryRecord } from "./types";
@@ -384,7 +384,9 @@ const up = ref('')
 const expanded = ref(false)
 const showSettings = ref(false)
 const cardAlphaExpanded = ref(false)
-const activeProviderId= ref('deepseek')
+// 空串 = 没配厂商：不假装选中某个内置 id（旧版预置过 deepseek/qwen，现在什么也不预置）
+// 挂载时 loadProviderConfig() 会用 storage 里的值或第一家厂商盖掉它
+const activeProviderId= ref('')
 const providerSetting = ref<ProviderSetting>({})
 // 厂商清单来自 storage（背景上下文与面板共用同一个 loadProviders）
 const providers = ref<ProviderCard[]>([])
@@ -409,6 +411,8 @@ const editName = ref('')
 const editPrompt = ref('')
 const uiStatus = ref<'loading' | 'generating' | 'stopped' | 'no-subtitle' | 'waiting' | 'ready' | 'stale' | 'select-mode'>('loading')
 const summaryText = ref('')
+// 分段汇总的进度文案（后台推 FRAME_PROGRESS）：只在正文还没开始流的时候显示
+const progressText = ref('')
 // stale 状态下屏幕上的正文是哪个模式生成的（条上要写明，不然“其他模式”是哪个没人知道）
 const staleModeId = ref('')
 const autoSummarize = ref(false)
@@ -451,6 +455,16 @@ function hexToRgb(hex: string) {
   }
 }
 
+// 相对亮度（WCAG 公式）：只为判断用户这套配色是“浅底”还是“深底”，见下面 --danger 的取法
+function relativeLuminance(hex: string): number {
+  const { r, g, b } = hexToRgb(hex)
+  const channel = (v: number) => {
+    const c = v / 255
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+  }
+  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+}
+
 function toCssValue(key: string): string {
   const hex = (colors as Record<string, string>)[key]
   const alpha = (alphas as Record<string, number>)[key] / 100
@@ -467,6 +481,12 @@ function applyTheme() {
   root.style.setProperty('--text-sub', toCssValue('textSub'))
   root.style.setProperty('--divider', toCssValue('divider'))
   root.style.setProperty('--card', toCssValue('card'))
+
+  // 危险色（删除 / 失败 / 未授权）：不新增一个要用户手调的色项，而是按卡片表面的明暗自动二选一 ——
+  // 用户把界面改亮就配深红、改暗就配浅红，怎么改都不会糊成一片（两个值在对应底上的对比度 ≈ 5:1 以上：4.97 / 5.15）
+  // 用法约束：只做文字 / 描边 / 淡底纹。它是按“在卡片上可读”挑的，当实心底又要反过来赌一次对比度
+  root.style.setProperty('--danger',
+    relativeLuminance(colors.card) < 0.5 ? '#FFB4AB' : '#B3261E')
 }
 
 function setColor(key: string, event: Event) {
@@ -620,6 +640,7 @@ function regenerate() {
   const seq = ++summaryRequestSeq
   uiStatus.value = 'generating'
   summaryText.value = ''
+  progressText.value = ''
 
   // 上一轮的长连接先断（它的回调靠 seq 自行作废）
   streamPort?.disconnect()
@@ -631,7 +652,14 @@ function regenerate() {
     // 过期请求丢弃（用户已切换模式/视频或发起了新请求）
     if (seq !== summaryRequestSeq) return
 
+    if (frame.type === FRAME_PROGRESS) {
+      progressText.value = frame.text ?? ''
+      return
+    }
+
     if (frame.type === FRAME_DELTA) {
+      // 正文开始流了：进度文案让位（它只在“什么都没有”时才有意义）
+      progressText.value = ''
       summaryText.value += frame.text ?? ''
       return
     }
@@ -1267,15 +1295,18 @@ textarea::placeholder {
   color: var(--text-sub);
 }
 .test-text.ok { color: var(--primary); }
-.test-text.bad { color: #ff6b6b; }
+.test-text.bad { color: var(--danger); }
 /* 列表行里的结果：自己占满一行，掉到厂商名下面（消息里可能带 URL，允许断词） */
 .mode-item .test-text {
   flex-basis: 100%;
   overflow-wrap: anywhere;
 }
+/* 未授权徽章走描边而非实心底：--danger 是按“在卡片上可读”挑的，
+   拿它做底、文字再反白一次，就又在赌对比度了 */
 .mode-badge.warn {
-  background: #ff6b6b;
-  color: #fff;
+  background: none;
+  border: 1px solid var(--danger);
+  color: var(--danger);
 }
 .history-back {
   padding: 5px 10px;
@@ -1721,8 +1752,8 @@ textarea::placeholder {
   color: var(--primary);
 }
 .mode-btn.danger:hover {
-  border-color: #ff6b6b;
-  color: #ff6b6b;
+  border-color: var(--danger);
+  color: var(--danger);
 }
 .mode-btn.primary {
   border-color: var(--primary);
@@ -1983,11 +2014,11 @@ textarea::placeholder {
   transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .history-del:hover {
-  opacity: 1; border-color: #ff6b6b; color: #ff6b6b;
+  opacity: 1; border-color: var(--danger); color: var(--danger);
 }
 .history-del.confirming {
-  opacity: 1; border-color: #ff6b6b; color: #ff6b6b;
-  background: color-mix(in srgb, #ff6b6b 15%, transparent);
+  opacity: 1; border-color: var(--danger); color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
 }
 .history-item:hover { background: var(--card); }
 .history-item.active {

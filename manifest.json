@@ -26,9 +26,7 @@
   "permissions": ["sidePanel", "storage"],
   "host_permissions": [
     "https://api.bilibili.com/*",
-    "https://*.hdslb.com/*",
-    "https://api.deepseek.com/*",
-    "https://dashscope.aliyuncs.com/*"
+    "https://*.hdslb.com/*"
   ],
   "optional_host_permissions": [
     "https://*/*",

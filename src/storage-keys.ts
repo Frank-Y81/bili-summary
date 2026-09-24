@@ -9,6 +9,8 @@ export const STORAGE_KEYS = {
   videoOwner: 'videoOwner',
   videoTitleId: 'videoTitleId',
   videoSubtitle: 'videoSubtitle',
+  // 每一行字幕的起始秒数（与 videoSubtitle 的行一一对应，background 写）—— 分片时用它找话题切换点
+  videoSubtitleMarks: 'videoSubtitleMarks',
   subtitleStatus: 'subtitleStatus',
   // 总结缓存（background 写）
   videoSummary: 'videoSummary',
