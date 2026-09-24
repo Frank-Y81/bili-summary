@@ -47,10 +47,26 @@
       <div class="spinner"></div>
       <p>正在获取字幕...</p>
     </div>
-    <div v-else-if="uiStatus === 'generating'">
+    <div v-else-if="uiStatus === 'generating'" class="stale-wrap">
+      <div class="stale-bar">
+        <span class="stale-text">正在生成{{ summaryText ? `（已收 ${summaryText.length} 字）` : '...' }}</span>
+        <div class="stale-actions">
+          <button class="regenerate-btn" title="中断当前请求，立刻重新生成" @click="regenerate">重新生成</button>
+          <button class="regenerate-btn secondary" title="中断当前请求（后台真停下，不再计费），保留已收到的部分" @click="stopGenerating">停止</button>
+        </div>
+      </div>
       <div v-if="!summaryText" class="state">
         <div class="spinner"></div>
         <p>正在生成总结...</p>
+      </div>
+      <div v-if="summaryText" class="summary" v-html="renderedSummary"></div>
+    </div>
+    <div v-else-if="uiStatus === 'stopped'" class="stale-wrap">
+      <div class="stale-bar">
+        <span class="stale-text">{{ summaryText ? '已停止生成（以下是已收到的部分）' : `已停止生成（一个字都没收到 ('^') ）` }}</span>
+        <div class="stale-actions">
+          <button class="regenerate-btn" @click="regenerate">重新生成</button>
+        </div>
       </div>
       <div v-if="summaryText" class="summary" v-html="renderedSummary"></div>
     </div>
@@ -68,14 +84,16 @@
       </div>
     </div>
     <div v-else-if="uiStatus === 'stale'" class="stale-wrap">
+      <div class="summary" v-html="renderedSummary"></div>
+      <!-- 说明条放正文后面：先把“这段是谁生成的”交代清楚，再给补救动作
+           （所以这里在 DOM 上必须在 .summary 之后，别为了“先提示”而调到前面） -->
       <div class="stale-bar">
-        <span class="stale-text">缓存来自其他模式</span>
+        <span class="stale-text">以上总结来自「{{ modeNameOf(staleModeId) }}」模式，当前是「{{ currentModeName || '未选' }}」模式</span>
         <div class="stale-actions">
           <button class="regenerate-btn" @click="regenerate">重新生成</button>
           <button class="regenerate-btn secondary" @click="openModeSelector">切换模式</button>
         </div>
       </div>
-      <div class="summary" v-html="renderedSummary"></div>
     </div>
     <div v-else class="summary" v-html="renderedSummary"></div>
 
@@ -83,7 +101,7 @@
     <div v-if="showHistory" class="mode-selector-overlay" @click.self="showHistory = false">
       <div class="mode-selector-panel history-panel">
         <div class="settings-header">
-          <h4>历史记录 <span class="history-count">{{ historyList.length }}</span></h4>
+          <h1>历史记录 <span class="history-count">{{ historyList.length }}</span></h1>
           <button class="settings-close" @click="showHistory = false">✕</button>
         </div>
         <div class="history-list">
@@ -117,7 +135,7 @@
     <div v-if="showModeSelector" class="mode-selector-overlay" @click.self="showModeSelector = false">
       <div class="mode-selector-panel">
         <div class="settings-header">
-          <h4>选择模式</h4>
+          <h1>选择模式</h1>
           <button class="settings-close" @click="showModeSelector = false">✕</button>
         </div>
         <div class="mode-selector-list">
@@ -142,12 +160,12 @@
       <div class="settings-panel">
         <div class="settings-inner">
         <div class="settings-header">
-          <h3>设置</h3>
+          <h1>设置</h1>
           <button class="settings-close" @click="showSettings = false">✕</button>
         </div>
         <div class="settings-body">
           <div class="setting-group">
-            <h4>颜色</h4>
+            <h2>颜色</h2>
             <div class="color-item">
               <span>背景色</span>
               <div class="color-controls">
@@ -204,7 +222,7 @@
             </div>
           </div>
           <div class="setting-group">
-            <h4>模型服务</h4>
+            <h2>模型服务</h2>
             <div class="api-row">
               <span>厂商</span>
               <div class="provider-btns">
@@ -233,15 +251,24 @@
             </div>
           </div>
           <div class="setting-group">
-            <h4>厂商管理（{{ providerConfigs.length }}）</h4>
+            <h2>厂商管理（{{ providerConfigs.length }}）</h2>
             <div class="mode-list">
-              <div v-for="p in providerConfigs" :key="p.id" class="mode-item" @click="startEditProvider(p)">
+              <div v-for="p in providerRows" :key="p.id" class="mode-item" @click="startEditProvider(p)">
                 <span class="mode-name">{{ p.name }}</span>
                 <span v-if="grantedMap[p.id] === false" class="mode-badge warn">未授权</span>
                 <div class="mode-actions" @click.stop>
+                  <button class="mode-btn" :disabled="p.test?.running" @click="testProviderRow(p)">
+                    {{ p.test?.running ? '测试中' : '测试' }}
+                  </button>
                   <button class="mode-btn" @click="startEditProvider(p)">编辑</button>
                   <button class="mode-btn danger" @click="deleteProvider(p.id)">删除</button>
                 </div>
+                <!-- 结果自己占一行：必须放在最后，flex 换行是按 DOM 顺序走的 -->
+                <span
+                  v-if="p.test"
+                  class="test-text"
+                  :class="p.test.running ? '' : (p.test.ok ? 'ok' : 'bad')"
+                >{{ p.test.text }}</span>
               </div>
             </div>
             <p v-if="!providerConfigs.length" class="api-hint">还没有任何厂商，点下方「+ 新增厂商」自己配一家</p>
@@ -249,7 +276,7 @@
             <button v-if="!providerEditor" class="mode-add" @click="openCreateProvider">+ 新增厂商</button>
 
             <div v-if="providerEditor" class="mode-form">
-              <h5 class="mode-form-title">{{ providerEditor === 'create' ? '新增厂商' : '编辑厂商' }}</h5>
+              <h3 class="mode-form-title">{{ providerEditor === 'create' ? '新增厂商' : '编辑厂商' }}</h3>
               <input v-model="editProviderName" placeholder="名称，例如 百炼" class="mode-input" />
               <input v-model="editProviderBaseUrl" placeholder="接口地址，例如 https://dashscope.aliyuncs.com/compatible-mode/v1" class="mode-input" @change="refreshEditorGrant" />
               <p v-if="editorRequestUrl" class="api-hint">实际请求：{{ editorRequestUrl }}</p>
@@ -268,15 +295,28 @@
                 <button class="mode-btn" @click="authorizeProviderDomain">授权访问</button>
                 <span class="grant-text">{{ editorGrantText }}</span>
               </div>
+              <!-- 用表单里当前的值测（不用先保存）：测的是第一个模型名，结果里会写清是哪个 -->
+              <div class="test-row">
+                <button
+                  class="mode-btn"
+                  :disabled="editorTest?.running"
+                  @click="testEditorConnection"
+                >{{ editorTest?.running ? '测试中...' : '测试连接' }}</button>
+                <span
+                  v-if="editorTest"
+                  class="test-text"
+                  :class="editorTest.running ? '' : (editorTest.ok ? 'ok' : 'bad')"
+                >{{ editorTest.text }}</span>
+              </div>
               <div class="mode-form-actions">
                 <button class="mode-btn primary" @click="saveProvider">{{ providerEditor === 'create' ? '创建' : '保存' }}</button>
-                <button class="mode-btn" @click="providerEditor = null">取消</button>
+                <button class="mode-btn" @click="closeProviderEditor">取消</button>
               </div>
             </div>
-            <p class="api-hint">模型名要填接口认的那个（不是界面上的叫法），每行一个；接口地址写到 /v1 那一层即可，后面会自动接 /chat/completions</p>
+            <p class="api-hint">模型名要填接口认的那个（不是界面上的叫法），每行一个；接口地址写到 /v1 那一层即可，后面会自动接 /chat/completions。填完可点「测试连接」验一下（真发一条最小请求）。</p>
           </div>
           <div class="setting-group">
-            <h4>行为</h4>
+            <h2>行为</h2>
             <div class="toggle-row">
               <span>打开 panel 直接总结</span>
               <input
@@ -289,7 +329,7 @@
             <p class="api-hint">勾选后打开侧边栏将自动用当前模式生成总结</p>
           </div>
           <div class="setting-group">
-            <h4>总结模式（{{ modes.length }}/{{ MAX_MODES }}）</h4>
+            <h2>总结模式（{{ modes.length }}/{{ MAX_MODES }}）</h2>
             <div class="mode-list">
               <div v-for="mode in modes" :key="mode.id" class="mode-item" :class="{ active: mode.id === activeModeId }" @click="selectMode(mode.id)">
                 <span v-if="mode.id === activeModeId" class="mode-check">✓</span>
@@ -303,7 +343,7 @@
             </div>
             <button v-if="modes.length < MAX_MODES && !modeEditor" class="mode-add" @click="openCreateMode">+ 新建模式</button>
             <div v-if="modeEditor" class="mode-form">
-              <h5 class="mode-form-title">{{ modeEditor === 'create' ? '新建模式' : '编辑模式' }}</h5>
+              <h3 class="mode-form-title">{{ modeEditor === 'create' ? '新建模式' : '编辑模式' }}</h3>
               <input v-model="editName" placeholder="模式名称" class="mode-input" />
               <textarea v-model="editPrompt" placeholder="模式指令，例如：请用三个要点总结，并给出行动建议" rows="3" class="mode-textarea"></textarea>
               <div class="mode-form-actions">
@@ -314,7 +354,7 @@
             <p class="api-hint">生成总结时使用当前选中的模式，通用约束（不杜撰等）始终生效</p>
           </div>
           <div class="setting-group">
-            <h4>字号</h4>
+            <h2>字号</h2>
             <div class="font-size-options">
               <button :class="{ active: fontSize === 'small' }" @click="setFontSize('small')">小</button>
               <button :class="{ active: fontSize === 'medium' }" @click="setFontSize('medium')">中</button>
@@ -333,8 +373,8 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { marked } from "marked";
 import { createDefaultMode, DEFAULT_MODE_ID, MAX_MODES, type PromptMode } from "./prompts";
-import { MSG_DELETE_RECORD, PORT_SUMMARY_STREAM, FRAME_GENERATE, FRAME_DELTA, FRAME_DONE, FRAME_ERROR } from "./messages";
-import { buildProviders, chatCompletionsUrl, loadProviderConfigs, normalizeBaseUrl, originPatternOf, saveProviderConfigs } from "./providers";
+import { MSG_DELETE_RECORD, PORT_SUMMARY_STREAM, FRAME_GENERATE, FRAME_CANCEL, FRAME_DELTA, FRAME_DONE, FRAME_ERROR } from "./messages";
+import { buildProviders, chatCompletionsUrl, loadProviderConfigs, normalizeBaseUrl, originPatternOf, saveProviderConfigs, testProviderConnection } from "./providers";
 import { STORAGE_KEYS } from "./storage-keys";
 import { type ProviderCard, type ProviderConfig, type ProviderSetting, type SummaryRecord } from "./types";
 
@@ -358,13 +398,19 @@ const editProviderKey = ref('')
 const showProviderKey = ref(false)
 const editorGranted = ref<boolean | null>(null)
 const grantedMap = ref<Record<string, boolean>>({})
+// 连接测试结果：厂商列表里按厂商 id 各存一份；editor 那份对应当前表单（还没保存的值）
+type TestState = { running: boolean; ok: boolean; text: string }
+const testStates = reactive<Record<string, TestState | undefined>>({})
+const editorTest = ref<TestState | null>(null)
 const modes = ref<PromptMode[]>([])
 const activeModeId = ref('')
 const modeEditor = ref<'create' | string | null>(null)
 const editName = ref('')
 const editPrompt = ref('')
-const uiStatus = ref<'loading' | 'generating' | 'no-subtitle' | 'waiting' | 'ready' | 'stale' | 'select-mode'>('loading')
+const uiStatus = ref<'loading' | 'generating' | 'stopped' | 'no-subtitle' | 'waiting' | 'ready' | 'stale' | 'select-mode'>('loading')
 const summaryText = ref('')
+// stale 状态下屏幕上的正文是哪个模式生成的（条上要写明，不然“其他模式”是哪个没人知道）
+const staleModeId = ref('')
 const autoSummarize = ref(false)
 const showModeSelector = ref(false)
 const tempSelectedModeId = ref('')
@@ -374,17 +420,24 @@ let summaryRequestSeq = 0
 let summaryInFlight = false
 
 // === 主题系统 ===
+// 默认配色：这里是唯一真值 —— 设置界面绑它，loadTheme 拿存档盖它，applyTheme 把它写进 <html>
+// 所以 CSS 里不要再写一份默认变量：两份一旦不同步，面板打开时会先闪默认配色、再跳到存档配色
 const colors = reactive({
-  bg: '#00452E',
-  primary: '#7ED957',
-  textMain: '#FFFFFF',
-  textSub: '#C8D5CE',
-  divider: '#2E6B4F',
-  card: '#0A5638'
+  bg: '#f3e6c8',
+  primary: '#8A5CF5',
+  textMain: '#2C2925',
+  textSub: '#808080',
+  divider: '#422f29',
+  card: '#EFDFBF'
 })
 const alphas = reactive({
-  bg: 100, primary: 100, textMain: 100, textSub: 100, divider: 100, card: 100
+  bg: 100, primary: 100, textMain: 100, textSub: 100, divider: 100, card: 95
 })
+
+// 立刻写进 DOM（函数声明会提升，这里可以先调）：
+// 等 loadTheme 的 storage 读取回来再设就晚了 —— 中间那一段时间内容已经渲染出来、变量却还没值，
+// 那些 var(--bg) 之类的声明会整条失效，看上去就是一下“没上色”
+applyTheme()
 const fontSize = ref('medium')
 const sizeMap = { small: '13px', medium: '15px', large: '17px' }
 const summaryFontSize = computed(() => sizeMap[fontSize.value as keyof typeof sizeMap])
@@ -537,6 +590,7 @@ async function refreshSummary(options: { auto?: boolean } = {}) {
   } else if(anyMode) {
     // 无缓存：勾选自动总结则直接生成，否则等用户选模式确认
       summaryText.value = anyMode.summary
+      staleModeId.value = anyMode.promptModeId as string
       uiStatus.value = 'stale'
   } else if(videoTitleId === videoId) {
       if(autoSummarize.value && options.auto !== false) {
@@ -554,8 +608,8 @@ let timer: number
 let streamPort: chrome.runtime.Port | null = null
 
 function regenerate() {
-  // 生成中不允许重复触发（防连点导致多次 API 调用）
-  if (summaryInFlight) return
+  // 生成中按 = 热重载：先中断在途请求（后台真 abort，不再烧 token、不落盘），再立刻开新一轮
+  if (summaryInFlight) cancelStream({ abort: true })
   // 启动计时，查看总结生成的耗时
   elapsed.value = 0
   timer = setInterval(()=> {
@@ -607,14 +661,27 @@ function regenerate() {
   port.postMessage({ type: FRAME_GENERATE })
 }
 
-// 中断在途的流式生成：seq 前进让在途帧全部作废，端口断开（后台会照样把这次生成写完）
-function cancelStream() {
+// 中断在途的流式生成：seq 前进让在途帧全部作废
+// abort = true：先发取消帧，后台真的 abort 掉 fetch（停止计费、不落盘）
+// abort = false：只断面板这边，后台照常跑完并落盘（“点历史记录去看别的”用的就是这条）
+function cancelStream(options: { abort?: boolean } = {}) {
   if (!summaryInFlight) return
+  const port = streamPort
   summaryRequestSeq++
   summaryInFlight = false
   clearInterval(timer)
-  streamPort?.disconnect()
   streamPort = null
+  if (options.abort) {
+    try { port?.postMessage({ type: FRAME_CANCEL }) } catch { /* 端口已断 */ }
+  }
+  port?.disconnect()
+}
+
+// 停止生成：中断请求，把已经收到的部分留在屏幕上
+function stopGenerating() {
+  if (!summaryInFlight) return
+  cancelStream({ abort: true })
+  uiStatus.value = 'stopped'
 }
 
 // 正常收尾（done / error）：停表、解除生成中标记
@@ -772,13 +839,22 @@ const currentProviderModel = computed(() =>
     ?? ''
 )
 
+// 厂商列表的行：把测试结果并进数据里（模板里就不用反复 testStates[p.id]，也躲掉索引可空的类型问题）
+const providerRows = computed(() =>
+  providerConfigs.value.map(p => ({ ...p, test: testStates[p.id] }))
+)
+
 function selectProvider(id: string) {
   activeProviderId.value = id
+  // 换了厂商，这家上一轮的测试结果就不代表现在这套了（选中的模型也跟着变了）
+  delete testStates[id]
   chrome.storage.local.set({[STORAGE_KEYS.activeProviderId]: id})
 }
 
 function setModel(m: string) {
   providerSetting.value[activeProviderId.value] = { model: m }
+  // 换了模型，这家刚测出来的结论也作废
+  delete testStates[activeProviderId.value]
   saveProviderConfig()
 }
 
@@ -858,6 +934,7 @@ function openCreateProvider() {
   editProviderBaseUrl.value = ''
   editProviderModels.value = ''
   editProviderKey.value = ''
+  editorTest.value = null
   void refreshEditorGrant()
 }
 
@@ -867,7 +944,13 @@ function startEditProvider(p: ProviderConfig) {
   editProviderBaseUrl.value = p.baseUrl
   editProviderModels.value = p.models.join('\n')
   editProviderKey.value = p.key
+  editorTest.value = null
   void refreshEditorGrant()
+}
+
+function closeProviderEditor() {
+  providerEditor.value = null
+  editorTest.value = null
 }
 
 async function saveProvider() {
@@ -888,13 +971,14 @@ async function saveProvider() {
     if (i >= 0) providerConfigs.value[i] = { ...providerConfigs.value[i], name, baseUrl, models, key }
   }
 
-  providerEditor.value = null
+  closeProviderEditor()
   await persistProviders()
 }
 
 async function deleteProvider(id: string) {
   providerConfigs.value = providerConfigs.value.filter(p => p.id !== id)
-  if (providerEditor.value === id) providerEditor.value = null
+  delete testStates[id]
+  if (providerEditor.value === id) closeProviderEditor()
   await persistProviders()
 }
 
@@ -946,9 +1030,41 @@ function authorizeProviderDomain() {
   })
 }
 
+// 连接测试：两处入口共用一个底层函数，差别只在“测的是哪一套配置”
+// 列表行测的是已保存的配置；编辑表单测的是表单里的值，所以可以“先测通再保存”
+
+// 测哪家的哪个模型：正在用的这家跟着界面上选中的模型走，其它家没有选中态，用第一个
+function modelForTest(p: ProviderConfig) {
+  return p.id === activeProviderId.value ? currentProviderModel.value : (p.models[0] ?? '')
+}
+
+async function testProviderRow(p: ProviderConfig) {
+  if (testStates[p.id]?.running) return
+
+  testStates[p.id] = { running: true, ok: false, text: '测试中...' }
+  const res = await testProviderConnection({ baseUrl: p.baseUrl, key: p.key, model: modelForTest(p) })
+  testStates[p.id] = { running: false, ok: res.ok, text: `${res.message} · ${res.ms}ms` }
+}
+
+async function testEditorConnection() {
+  if (editorTest.value?.running) return
+
+  const models = editProviderModels.value.split('\n').map(m => m.trim()).filter(Boolean)
+  editorTest.value = { running: true, ok: false, text: '测试中...' }
+  const res = await testProviderConnection({
+    baseUrl: normalizeBaseUrl(editProviderBaseUrl.value),
+    key: editProviderKey.value.trim(),
+    model: models[0] ?? ''
+  })
+  editorTest.value = { running: false, ok: res.ok, text: `${res.message} · ${res.ms}ms` }
+}
+
 // 写 storage → 重装卡片 → 兼底选中项与被删模名称
 async function persistProviders() {
   await saveProviderConfigs(providerConfigs.value)
+  // 配置变了，之前的测试结论就不再代表现在这套（列表行和表单都清掉）
+  for (const id of Object.keys(testStates)) delete testStates[id]
+  editorTest.value = null
   await refreshProviders()
   void refreshGrantedMap()
 
@@ -1064,13 +1180,13 @@ watch(showSettings, (open) => {
 </script>
 
 <style scoped>
-:root {
-  --bg: #00452E;
-  --primary: #7ED957;
-  --text-main: #FFFFFF;
-  --text-sub: #C8D5CE;
-  --divider: #2E6B4F;
-  --card: #0A5638;
+
+/* 占位符跟着主题的次要文字色：与 .api-hint 同一套色（在这里它们都是“提示”，不是内容）
+   （Firefox 会在 color 之外再叠一层透明度，所以补一个 opacity: 1） */
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-sub);
+  opacity: 1;
 }
 
 .app {
@@ -1139,6 +1255,23 @@ watch(showSettings, (open) => {
 .grant-text {
   font-size: 11.5px;
   color: var(--text-sub);
+}
+.test-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.test-text {
+  font-size: 11.5px;
+  color: var(--text-sub);
+}
+.test-text.ok { color: var(--primary); }
+.test-text.bad { color: #ff6b6b; }
+/* 列表行里的结果：自己占满一行，掉到厂商名下面（消息里可能带 URL，允许断词） */
+.mode-item .test-text {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
 }
 .mode-badge.warn {
   background: #ff6b6b;
@@ -1295,13 +1428,13 @@ watch(showSettings, (open) => {
   max-width: 560px;
   background: var(--card);
   border-radius: 14px;
-  padding: 28px;
+  padding: 22px;
   box-sizing: border-box;
 }
 
 /* 滚动容器：在卡片内侧滚动，内容永远碰不到卡片边缘 */
 .settings-panel {
-  max-height: calc(90vh - 56px);
+  max-height: calc(90vh - 44px);
   overflow-y: auto;
 }
 
@@ -1313,14 +1446,14 @@ watch(showSettings, (open) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 /* 滚动到底部时内容不贴边（滚动容器 padding-bottom 会失效，用内容区补） */
 .settings-body {
-  padding-bottom: 28px;
+  padding-bottom: 24px;
 }
-.settings-header h3 { margin: 0; font-size: 16px; }
+.settings-header h1 { margin: 0; font-size: 16px; }
 .settings-close {
   background: none;
   border: none;
@@ -1331,15 +1464,17 @@ watch(showSettings, (open) => {
 .settings-close:hover { color: var(--primary); }
 
 .setting-group {
-  margin-bottom: 30px;
+  margin-bottom: 22px;
 }
 
-.setting-group h4 {
+.setting-group h2 {
   margin: 0 0 10px;
-  font-size: 13px;
-  color: var(--text-sub);
+  padding-bottom: 5px;
+  font-size: 15px;
+  color: var(--text-main);
   font-weight: 600;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px;
+  border-bottom: 1px solid var(--divider);
 }
 
 .color-item {
@@ -1532,6 +1667,8 @@ watch(showSettings, (open) => {
 }
 .mode-item {
   display: flex;
+  /* 测试结果要换到名称下面那一行，所以得允许换行 */
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
@@ -1560,7 +1697,8 @@ watch(showSettings, (open) => {
 }
 .mode-badge {
   font-size: 11px;
-  color: var(--bg);
+  /* 反白：主色底上的文字取“它所处表面的颜色” —— 徽章都在卡片里，所以用卡片色（不是页面背景色） */
+  color: var(--card);
   background: var(--primary);
   padding: 2px 6px;
   border-radius: 4px;
@@ -1725,7 +1863,7 @@ watch(showSettings, (open) => {
 .mode-selector-panel .settings-header {
   margin-bottom: 12px;
 }
-.mode-selector-panel h4 {
+.mode-selector-panel h1 {
   margin: 0;
   font-size: 15px;
 }
@@ -1777,7 +1915,8 @@ watch(showSettings, (open) => {
 }
 .regenerate-btn:hover {
   background: var(--primary);
-  color: var(--bg);
+  /* 同上：这排按钮在 stale-bar（卡片色）上 */
+  color: var(--card);
 }
 
 .font-size-options {

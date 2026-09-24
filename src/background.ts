@@ -1,5 +1,5 @@
 import { createDefaultMode, type PromptMode } from './prompts'
-import { MSG_GET_SUBTITLE_INFO, MSG_DELETE_RECORD, PORT_SUMMARY_STREAM, FRAME_GENERATE, FRAME_DELTA, FRAME_DONE, FRAME_ERROR } from './messages'
+import { MSG_GET_SUBTITLE_INFO, MSG_DELETE_RECORD, PORT_SUMMARY_STREAM, FRAME_GENERATE, FRAME_CANCEL, FRAME_DELTA, FRAME_DONE, FRAME_ERROR } from './messages'
 import { loadProviders } from "./providers";
 import { STORAGE_KEYS } from './storage-keys';
 import type { ProviderSetting, SummaryRecord } from './types';
@@ -33,8 +33,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 chrome.runtime.onConnect.addListener(port => {
   if(port.name !== PORT_SUMMARY_STREAM) return
 
+  // 这条连接上在途的请求：面板点“停止/重新生成”时用它把 fetch 真断掉
+  let controller: AbortController | null = null
+
   port.onMessage.addListener(message => {
+    // 中断：abort 后整个生成会以 AbortError 收场，既不落盘也不进历史
+    if(message.type === FRAME_CANCEL) {
+      controller?.abort()
+      return
+    }
     if(message.type !== FRAME_GENERATE) return
+    // 同一条连接重复要生成：忽略（面板的“重新生成”是断旧连、开新连）
+    if(controller) return
+
+    const ac = new AbortController()
+    controller = ac
 
     // MV3 的 service worker 空闲约 30 秒会被回收（长请求是已知雷区）：生成期间定期戳一次扩展 API 续命
     const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000)
@@ -42,9 +55,19 @@ chrome.runtime.onConnect.addListener(port => {
     generateSummary(text => {
       // 面板中途关了的话端口已断，postMessage 会抛——不能让它影响后台继续生成、落盘
       try { port.postMessage({ type: FRAME_DELTA, text }) } catch { /* 面板已关闭 */ }
-    })
-      .then(summary => port.postMessage({ type: FRAME_DONE, summary }))
+    }, ac.signal)
+      .then(summary => {
+        // 刚好在收尾前被中断：不算完成，也别再往已废弃的连接上推
+        if(ac.signal.aborted) return
+        // 面板中途关了同样会抛（与上面的 delta 帧同理）：结果已经落盘，静默即可
+        try { port.postMessage({ type: FRAME_DONE, summary }) } catch { /* 面板已关闭 */ }
+      })
       .catch(err => {
+        // 用户主动中断不是错误：面板那边早就不听了，静默收场
+        if(isAbortError(err)) {
+          console.log('[summary] 已按用户要求中断')
+          return
+        }
         console.error('generateSummary的promise失败：', err)
         try {
           port.postMessage({
@@ -53,9 +76,16 @@ chrome.runtime.onConnect.addListener(port => {
           })
         } catch { /* 面板已关闭 */ }
       })
-      .finally(() => clearInterval(keepAlive))
+      .finally(() => {
+        clearInterval(keepAlive)
+        if(controller === ac) controller = null
+      })
   })
 })
+
+function isAbortError(err: unknown): boolean {
+  return (err as { name?: string } | null)?.name === 'AbortError'
+}
 
 // 删除历史记录：只认 createdAt（与历史列表渲染、选中态用的是同一个键）
 async function deleteRecord(createdAt: number) {
@@ -116,7 +146,7 @@ async function handleSubtitleInfo(message: any) {
   }
 }
 
-async function generateSummary(onDelta?: (text: string) => void) {
+async function generateSummary(onDelta?: (text: string) => void, signal?: AbortSignal) {
   const { videoTitle, videoSubtitle, videoDesc, videoId, videoTitleId } = 
     await chrome.storage.local.get([
       STORAGE_KEYS.videoTitle, STORAGE_KEYS.videoSubtitle, STORAGE_KEYS.videoDesc,
@@ -146,8 +176,12 @@ async function generateSummary(onDelta?: (text: string) => void) {
     subtitle: videoSubtitle as string,
     prompt: mode.prompt,
     model:providerSetting?.[activeProviderId as string]?.model,
-    onDelta
+    onDelta,
+    signal
   })
+
+  // 中断：请求断了就到此为止，不许把半截结果写进缓存和历史
+  if(signal?.aborted) throw new DOMException('Aborted', 'AbortError')
 
   const {videoId: latestId} = await chrome.storage.local.get(STORAGE_KEYS.videoId)
   if(videoId !== latestId) {

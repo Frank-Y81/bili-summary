@@ -23,6 +23,8 @@ export interface GenerateInput {
   model: string
   // 流式：厂商每收到一帧就调一次；不传 = 只要最终整段（历史记录、缓存拿到的都是整段）
   onDelta?: (text: string) => void
+  // 中断：面板点“停止/重新生成”时后台 abort，请求真的断掉（拒收后不再产生费用与落盘）
+  signal?: AbortSignal
 }
 
 export type ProviderSetting = Record<string, { model: string }>

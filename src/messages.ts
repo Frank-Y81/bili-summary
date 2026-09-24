@@ -8,6 +8,8 @@ export const MSG_DELETE_RECORD = 'deleteRecord'
 // 面板 → 后台：FRAME_GENERATE；后台 → 面板：FRAME_DELTA 若干条，最后恰好一条 FRAME_DONE / FRAME_ERROR
 export const PORT_SUMMARY_STREAM = 'summaryStream'
 export const FRAME_GENERATE = 'generate'
+// 面板 → 后台：中断在途请求（后台据此 abort 掉 fetch，不再烧 token、不落盘）
+export const FRAME_CANCEL = 'cancel'
 export const FRAME_DELTA = 'delta'
 export const FRAME_DONE = 'done'
 export const FRAME_ERROR = 'error'

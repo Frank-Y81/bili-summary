@@ -20,6 +20,7 @@ function createProvider(cfg: ProviderConfig): ProviderCard {
     try {
       res = await postChat(chatCompletionsUrl(cfg.baseUrl), {
         method: 'POST',
+        signal: input.signal,
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer ' + key
@@ -36,6 +37,8 @@ function createProvider(cfg: ProviderConfig): ProviderCard {
         })
       })
     } catch (err) {
+      // 用户主动中断：这不是“发不出去”，必须原样抛出去，后台据此静默收场（也别再落盘）
+      if(isAbortError(err)) throw err
       // fetch 直接抛（不是 HTTP 错误）：多半是域名没授权或地址写错，笼统说“生成失败”等于没说
       console.error('请求发不出去：', err)
       return `请求发不出去：「${cfg.name}」的域名可能还没授权（设置 → 厂商管理 → 授权访问），或接口地址填错了`
@@ -61,6 +64,11 @@ function createProvider(cfg: ProviderConfig): ProviderCard {
     return text
     }
   }
+}
+
+// abort 抛出来的错：DOMException（浏览器）/ Error name 为 AbortError（部分环境）
+function isAbortError(err: unknown): boolean {
+  return (err as { name?: string } | null)?.name === 'AbortError'
 }
 
 // 读 SSE 流：只认 data: 行。帧的边界与读取的块边界无关，所以按行缓冲，最后一段不完整的留到下一轮
@@ -128,6 +136,11 @@ async function postChat(url: string, init: RequestInit): Promise<Response> {
   let cursor = 0
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller) {
+      // dry-run 也认中断：替身走的是与真调用同一条解析链，不认的话测不出中断路径
+      if(init.signal?.aborted) {
+        controller.error(new DOMException('Aborted', 'AbortError'))
+        return
+      }
       if (cursor >= log.length) {
         controller.enqueue(encoder.encode('data: [DONE]\n\n'))
         controller.close()
@@ -186,6 +199,53 @@ export function normalizeBaseUrl(raw: string): string {
 // 真正发出去的地址（请求时机也归一化一次，存过的旧配置不用重新保存就能生效）
 export function chatCompletionsUrl(baseUrl: string): string {
   return normalizeBaseUrl(baseUrl) + '/chat/completions'
+}
+
+// 连接测试：真发一条最小请求，验的是「地址 + key + 域名授权 + 模型名」这一整条链路
+// 生成失败时最贵的排查成本就是分不清是哪一环坏的 —— 这里一次性把它拆开
+// 只判 HTTP 是否通：思考型模型在小 max_tokens 下可能只回空 content，那也是正常响应
+export async function testProviderConnection(input: {
+  baseUrl: string
+  key: string
+  model: string
+}): Promise<{ ok: boolean; ms: number; message: string }> {
+  const url = chatCompletionsUrl(input.baseUrl)
+  const startedAt = Date.now()
+  const done = (ok: boolean, message: string) => ({ ok, ms: Date.now() - startedAt, message })
+
+  if(DRY_RUN) return done(true, '【dry-run】跳过真实请求')
+  if(!input.key) return done(false, '还没填 API Key')
+  if(!input.model) return done(false, '还没填模型名')
+
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + input.key
+      },
+      body: JSON.stringify({
+        model: input.model,
+        max_tokens: 16,
+        stream: false,
+        messages: [{ role: 'user', content: 'ping' }]
+      }),
+      // 测试不能把面板挂在那儿等：20 秒没动静就当不通
+      signal: AbortSignal.timeout(20000)
+    })
+  } catch (err) {
+    // 与 generate 同一个坑：域名没授权时 fetch 直接抛，不是 HTTP 错误
+    console.error('连接测试发不出去：', err)
+    return done(false, `请求发不出去：域名可能没授权（点上面的「授权访问」），或地址/网络不通（${url}）`)
+  }
+
+  if(!res.ok) {
+    const detail = (await res.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 160)
+    return done(false, `HTTP ${res.status}${detail ? '：' + detail : ''}`)
+  }
+
+  return done(true, `连接正常（${input.model} 已响应）`)
 }
 
 // 读原始配置（带 key）：编辑界面要用，卡片里没有 key

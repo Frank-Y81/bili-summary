@@ -21,7 +21,7 @@ export function createDefaultMode(): PromptMode {
   return {
     id: DEFAULT_MODE_ID,
     name: '通用笔记',
-    prompt: '请返回您反复阅读正文后精心写成的详尽笔记，字数上限约为6500',
+    prompt: '请返回您反复阅读正文后精心写成的笔记，默认使用中文。不要问候，直接开始。',
     createdAt: 0
   }
 }
